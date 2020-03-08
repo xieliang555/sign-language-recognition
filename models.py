@@ -111,6 +111,11 @@ class Seq2Seq(nn.Module):
         self.device = device
 
         self.cnn = cnn
+        
+        # ?
+        for params in self.cnn.parameters():
+            params.requires_grad = False
+        
         self.transformer = transformer
 
     def forward(self, x, tgt):
