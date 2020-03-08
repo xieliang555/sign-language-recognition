@@ -130,11 +130,11 @@ def greedy_decoder(model, enc_inputs, targets):
         targets: ['sos','w1','w2'...'wn']
         Beam search: K=1
     """
-    enc_outputs = model.encoder(enc_inputs)
+    enc_outputs = model.transformer.Transformer.encoder(enc_inputs)
     dec_inputs = copy.deepcopy(targets)
     for i in range(1, len(dec_inputs)):
-        dec_outputs = model.decoder(dec_inputs, enc_inputs, enc_outputs)
-        out = model.out(dec_outputs)
+        dec_outputs = model.transformer.Transformer.decoder(dec_inputs, enc_inputs, enc_outputs)
+        out = model.transformer.out(dec_outputs)
         idx = out.max(dim=-1, keepdim=False)[1]
         dec_inputs[i] = idx.data[i-1]
     return dec_inputs
