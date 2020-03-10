@@ -8,8 +8,37 @@ import utils
 import math
 
 
+def get_padding_mask(self, data):
+    if len(data.size()) == 2:
+        # tgt: [T, N]
+        # the index of tgt padding is 1
+        mask = data.eq(1).transpose(0, 1)
+    else if len(data.size()) == 5:
+        # src: [N, C, T, H, W]
+        # the index of src padding is 0
+        data = data.permute(0, 2, 1, 3, 4).sum(dim=(-3, -2, -1))
+        mask = data.eq(0).transpose(0, 1)
+
+    mask = mask.masked_fill(mask == True, float(
+        '-inf')).masked_fill(mask == False, float(0.0))
+    return mask
+
+
+def get_subsequent_mask(self, tgt):
+    # torch.triu 上三角
+    seq_len = tgt.size(0)
+    mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1)
+    mask = mask.masked_fill(mask == 1.0, float(
+        '-inf')).masked_fill(mask == 0.0, float(0.0))
+    return mask
+
+
 class Res3D(nn.Module):
     def __init__(self, res3d):
+        '''
+        Args:
+            res3d: the pretrained model
+        '''
         super(Res3D, self).__init__()
         self.convs = nn.Sequential(
             res3d.stem,
@@ -28,7 +57,6 @@ class Res3D(nn.Module):
 
 class Transformer(nn.Module):
     '''
-    Encoder + Decoder structure
     Args:
         d_model: the embdedding feature dimension
     '''
@@ -50,25 +78,11 @@ class Transformer(nn.Module):
             activation=activation)
         self.out = nn.Linear(d_model, tgt_vocab_size)
 
-    def get_paddding_mask(self, tgt):
-        # the index of '<pad>' is 1
-        mask = tgt.eq(1).transpose(0, 1)
-        mask = mask.masked_fill(mask == True, float(
-            '-inf')).masked_fill(mask == False, float(0.0))
-        return mask
-
-    def get_subsequent_mask(self, tgt):
-        # torch.triu 上三角
-        seq_len = tgt.size(0)
-        mask = torch.triu(torch.ones(seq_len, seq_len), diagonal=1)
-        mask = mask.masked_fill(mask == 1.0, float(
-            '-inf')).masked_fill(mask == 0.0, float(0.0))
-        return mask
-
-    def forward(self, x, tgt):
-        # src无法计算pad_mask, batch最好是1
-        tgt_padding_mask = self.get_paddding_mask(tgt).to(self.device)
-        tgt_subsequent_mask = self.get_subsequent_mask(tgt).to(self.device)
+    def forward(self, x, tgt, src_padding_mask):
+        src_padding_mask = src_padding_mask.to(self.device)
+        memory_padding_mask = src_padding_mask.to(self.device)
+        tgt_padding_mask = get_padding_mask(tgt).to(self.device)
+        tgt_subsequent_mask = get_subsequent_mask(tgt).to(self.device)
 
         x = x * math.sqrt(self.d_model)
         x = self.dropout(self.pe(x))
@@ -76,7 +90,9 @@ class Transformer(nn.Module):
         tgt = self.dropout(self.pe(tgt))
         out = self.transformer(
             x, tgt, tgt_mask=tgt_subsequent_mask,
-            tgt_key_padding_mask=tgt_padding_mask)
+            src_key_padding_mask=src_padding_mask,
+            tgt_key_padding_mask=tgt_padding_mask,
+            memory_key_padding_mask=memory_padding_mask)
 
         return self.out(out)
 
@@ -111,14 +127,13 @@ class Seq2Seq(nn.Module):
         self.device = device
 
         self.cnn = cnn
-        
-        # ?
+
         for params in self.cnn.parameters():
             params.requires_grad = False
-        
+
         self.transformer = transformer
 
-    def forward(self, x, tgt):
+    def forward(self, x, tgt, src_padding_mask):
         # cnn_out: [T, N, E]
         cnn_out = torch.zeros(self.nclip, x.size(
             0), self.transformer.d_model).to(self.device)
@@ -126,19 +141,39 @@ class Seq2Seq(nn.Module):
         for idx, clip in enumerate(x):
             cnn_out[idx, :, :] = self.cnn(clip)
 
-        y = self.transformer(cnn_out, tgt)
+        y = self.transformer(cnn_out, tgt, src_padding_mask)
         return y
 
 
-def greedy_decoder(model, enc_inputs, targets):
+# beam >1 ?
+def greedy_decoder(model, enc_inputs, targets, src_padding_mask, device):
     """
         targets: ['sos','w1','w2'...'wn']
         Beam search: K=1
     """
-    enc_outputs = model.transformer.Transformer.encoder(enc_inputs)
-    dec_inputs = copy.deepcopy(targets)
+    src_padding_mask = src_padding_mask.to(device)
+    memory_padding_mask = src_padding_mask.to(device)
+    tgt_padding_mask = get_padding_mask(targets).to(device)
+    tgt_subsequent_mask = get_subsequent_mask(targets).to(device)
+
+    enc_inputs = enc_inputs * math.sqrt(model.transformer.d_model)
+    enc_inputs = model.transformer.dropout(model.transformer.pe(enc_inputs))
+    enc_outputs = model.transformer.Transformer.encoder(
+        enc_inputs, src_key_padding_mask=src_padding_mask)
+
+    dec_inputs = targets.clone()
     for i in range(1, len(dec_inputs)):
-        dec_outputs = model.transformer.Transformer.decoder(dec_inputs, enc_inputs, enc_outputs)
+        dec_inputs = model.transformer.embedding(
+            dec_inputs) * math.sqrt(model.transformer.d_model)
+        dec_inputs = model.transformer.dropout(
+            model.transformer.pe(dec_inputs))
+
+        dec_outputs = model.transformer.Transformer.decoder(
+            dec_inputs, enc_outputs, 
+            tgt_mask=tgt_subsequent_mask, 
+            tgt_key_padding_mask=tgt_padding_mask, 
+            memory_key_padding_mask=memory_padding_mask)
+        
         out = model.transformer.out(dec_outputs)
         idx = out.max(dim=-1, keepdim=False)[1]
         dec_inputs[i] = idx.data[i-1]
@@ -153,8 +188,11 @@ def train(model, train_loader, device, criterion, optimizer, TRG, writer, n_epoc
     for batch_idx, batch in enumerate(train_loader):
         inputs = batch['videos'].to(device)
         targets = batch['annotations'].to(device)
+        # ?
+        src_padding_mask = get_padding_mask(inputs).to(device)
+
         optimizer.zero_grad()
-        outputs = model(inputs, targets[:-1, :])
+        outputs = model(inputs, targets[:-1, :], src_padding_mask)
         loss = criterion(outputs.view(-1, outputs.size(-1)),
                          targets[1:, :].view(-1))
         loss.backward()
@@ -188,8 +226,13 @@ def evaluate(model, dev_loader, device, criterion, TRG):
     for batch_idx, batch in enumerate(dev_loader):
         inputs = batch['videos'].to(device)
         targets = batch['annotations'].to(device)
-        dec_inputs = greedy_decoder(model, inputs, targets[:-1, :])
-        outputs = model(inputs, dec_inputs)
+        # ?
+        src_padding_mask = get_padding_mask(inputs).to(device)
+        # ?
+        dec_inputs = greedy_decoder(
+            model, inputs, targets[:-1, :],
+            src_padding_mask, device).to(device)
+        outputs = model(inputs, dec_inputs, src_padding_mask)
         loss = criterion(outputs.view(-1, outputs.size(-1)),
                          targets[1:, :].view(-1))
 

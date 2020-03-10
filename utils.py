@@ -53,8 +53,13 @@ def bleu_count(outputs, targets, TRG):
     '''
     outputs = outputs.max(2)[1].transpose(0,1)
     targets = targets.transpose(0,1)
-    candidate_corpus = [itos(idx_seq, TRG) for idx_seq in outputs]
-    references_corpus = [[itos(idx_seq, TRG)] for idx_seq in targets]
+    
+    mask = targets.ne(TRG.vocab.stoi['<pad>'])
+    outputs = outputs.masked_select(mask)
+    targets = targets.masked_select(mask)
+    
+    candidate_corpus = [itos(outputs, TRG)]
+    references_corpus = [[itos(targets, TRG)]]
     return bleu_score(candidate_corpus, references_corpus)
 
 
@@ -68,6 +73,11 @@ def wer_count(outputs, targets, TRG):
     '''
     outputs = outputs.max(2)[1].transpose(0,1)
     targets = targets.transpose(0,1)
-    candidate_corpus = [' '.join(itos(idx_seq, TRG)) for idx_seq in outputs]
-    reference_corpus = [' '.join(itos(idx_seq, TRG)) for idx_seq in targets]
+    
+    mask = targets.ne(TRG.vocab.stoi['<pad>'])
+    outputs = outputs.masked_select(mask)
+    targets = targets.masked_select(mask)
+    
+    candidate_corpus = [' '.join(itos(outputs, TRG))]
+    reference_corpus = [' '.join(itos(targets, TRG))]
     return wer(reference_corpus, candidate_corpus, standardize = True)
