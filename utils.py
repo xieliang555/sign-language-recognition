@@ -44,9 +44,10 @@ def itos(idx_seq, TRG):
     return [TRG.vocab.itos[idx] for idx in idx_seq]
 
 
+# √
 def bleu_count(outputs, targets, TRG):
     '''
-    sentence level
+    corpus level
     shape:
         outputs: [T, N, E]
         targets: [T, N]
