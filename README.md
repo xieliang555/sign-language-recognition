@@ -1,7 +1,8 @@
 # Sign-Language-Recognition
 
 ## Discription
-3D CNN (feature extraction) + transformer (temperal modeling) for continuous sign language recognition. 
+3D CNN (feature extraction) + transformer (temporal modeling) for continuous sign language recognition. 
+
 
 
 ## Done
